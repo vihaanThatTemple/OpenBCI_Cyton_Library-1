@@ -181,7 +181,7 @@ boolean setupSDcard(char limit){
       return fileIsOpen;
   }
 
-  Serial0.print("Sample rate: 1000Hz, 8 channels, SD-only");
+  Serial0.println("Sample rate: 1000Hz, 8 channels, SD-only");
 
   incrementFileCounter();
   openvol = root.openRoot(volume);
