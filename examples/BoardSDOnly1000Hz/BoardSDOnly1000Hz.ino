@@ -25,7 +25,7 @@ boolean SDfileOpen = false;
 void setup() {
   board.begin();
   board.useAccel(false);
-  board.setSampleRate(SAMPLE_RATE_1000);
+  board.setSampleRate(OpenBCI_32bit_Library::SAMPLE_RATE_1000);
 
   Serial0.println("OpenBCI 1000Hz SD-Only Mode");
   Serial0.println("Send file-size command (A/S/F/G/H/J/K/L) then 'b' to start");
@@ -48,8 +48,8 @@ void loop() {
     sdProcessChar(newChar);
     board.processChar(newChar);
     // Re-apply 1000Hz after library's forced 250Hz reset on 'b' command
-    if (board.streaming && board.curSampleRate != SAMPLE_RATE_1000) {
-      board.streamSafeSetSampleRate(SAMPLE_RATE_1000);
+    if (board.streaming && board.curSampleRate != OpenBCI_32bit_Library::SAMPLE_RATE_1000) {
+      board.streamSafeSetSampleRate(OpenBCI_32bit_Library::SAMPLE_RATE_1000);
     }
   }
 
@@ -57,8 +57,8 @@ void loop() {
     char newChar = board.getCharSerial1();
     sdProcessChar(newChar);
     board.processChar(newChar);
-    if (board.streaming && board.curSampleRate != SAMPLE_RATE_1000) {
-      board.streamSafeSetSampleRate(SAMPLE_RATE_1000);
+    if (board.streaming && board.curSampleRate != OpenBCI_32bit_Library::SAMPLE_RATE_1000) {
+      board.streamSafeSetSampleRate(OpenBCI_32bit_Library::SAMPLE_RATE_1000);
     }
   }
 
