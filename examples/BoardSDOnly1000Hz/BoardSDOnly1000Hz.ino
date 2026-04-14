@@ -7,7 +7,7 @@
  *
  * Usage:
  *   1. Open serial monitor at 115200 baud
- *   2. Send a file-size command: A(5min) S(15min) F(30min) G(1hr) H(2hr) J(4hr) K(12hr) L(24hr)
+ *   2. Send a file-size command: A(5min) S(15min) F(30min) G(1hr) H(2hr) J/K/L(4hr max)
  *   3. Send 'b' to start recording
  *   4. Recording stops automatically when the file is full, or send 'j' to stop early
  *
