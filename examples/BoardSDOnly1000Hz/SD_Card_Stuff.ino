@@ -1,12 +1,12 @@
 // 4x block counts to accommodate 1000Hz (4x the 250Hz default sample rate)
+// Max duration is 4hr at 1000Hz. 12hr/24hr would overflow uint32_t when
+// multiplied by 512 for file allocation, so they are capped at 4hr.
 #define BLOCK_5MIN    (16890 * 4)
 #define BLOCK_15MIN   (BLOCK_5MIN*3)
 #define BLOCK_30MIN   (BLOCK_15MIN*2)
 #define BLOCK_1HR     (BLOCK_30MIN*2)
 #define BLOCK_2HR     (BLOCK_1HR*2)
 #define BLOCK_4HR     (BLOCK_1HR*4)
-#define BLOCK_12HR    (BLOCK_1HR*12)
-#define BLOCK_24HR    (BLOCK_1HR*24)
 
 #define OVER_DIM      20 // make room for up to 20 write-time overruns
 #define ERROR_LED     false
@@ -169,10 +169,9 @@ boolean setupSDcard(char limit){
       BLOCK_COUNT = BLOCK_2HR; break;
     case 'J':
       BLOCK_COUNT = BLOCK_4HR; break;
-    case 'K':
-      BLOCK_COUNT = BLOCK_12HR; break;
-    case 'L':
-      BLOCK_COUNT = BLOCK_24HR; break;
+    case 'K':  // 12hr not supported at 1000Hz (uint32_t overflow), cap at 4hr
+    case 'L':  // 24hr not supported at 1000Hz (uint32_t overflow), cap at 4hr
+      BLOCK_COUNT = BLOCK_4HR; break;
     default:
       if(!board.streaming) {
         Serial0.println("invalid BLOCK count");
@@ -235,6 +234,7 @@ boolean setupSDcard(char limit){
   minWriteTime = 65000;
   byteCounter = 0;  // counter from 0 - 512
   blockCounter = 0; // counter from 0 - BLOCK_COUNT;
+  t = millis();     // mark recording start for elapsed time calculation
   if(fileIsOpen == true){  // send corresponding file name to controlling program
     if(!board.streaming) {
       Serial0.print("Corresponding SD file ");
