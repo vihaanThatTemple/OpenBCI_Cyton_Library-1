@@ -80,7 +80,7 @@ All tests run without hardware.
 | Symptom | Fix |
 |---|---|
 | Red dot, "Could not find Cyton" | Check Cyton is on, switch is on **PC**, dongle is plugged in. Click **Connect**. |
-| App freezes during file-open | 4 hr pre-allocation can take 2–3 s on slow cards. If it stays frozen >5 s, the card is bad. |
+| "Opening SD file…" takes a long time | 4hr pre-allocation can take up to 30s on slow cards. The UI stays responsive; wait for the timer to start or for an error popup. |
 | "Recording complete" never fires | Open **Show details**. If you see a `$$$` line, the file closed; click OK. If not, wait 10 s then remove the card. |
 | Dongle unplugged mid-recording | The Cyton keeps recording on its own. Wait for your selected duration to elapse, then power it off and grab the card. |
 

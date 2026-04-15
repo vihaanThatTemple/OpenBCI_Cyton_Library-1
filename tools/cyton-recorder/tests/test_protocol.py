@@ -55,7 +55,8 @@ def test_arm_unknown_duration_raises(fake_serial):
         proto.arm("99 min")
 
 
-def test_arm_timeout_raises_when_sd_silent(fake_serial):
+def test_arm_timeout_raises_when_sd_silent(fake_serial, monkeypatch):
+    monkeypatch.setattr("cyton_recorder.FILE_OPEN_TIMEOUT_S", 0.1)
     proto = Protocol(transport=fake_serial)
     with pytest.raises(ProtocolTimeout):
         proto.arm("5 min")
