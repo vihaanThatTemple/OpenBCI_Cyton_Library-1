@@ -505,7 +505,7 @@ class RecorderApp:
             self._enter_done()
 
         def on_error(exc):
-            if isinstance(exc, ProtocolTimeout):
+            if isinstance(exc, (ProtocolTimeout, OSError)):
                 messagebox.showwarning(
                     "Stop timeout",
                     "File may not have closed cleanly. Wait 10 seconds before removing the SD card.",

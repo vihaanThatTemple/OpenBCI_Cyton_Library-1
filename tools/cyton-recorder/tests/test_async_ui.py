@@ -120,12 +120,6 @@ def test_run_async_thread_is_daemon():
     """Background threads must be daemon so they don't block process exit."""
     app = _make_app()
 
-    thread_flags = []
-
-    original_thread_init = threading.Thread.__init__
-
-    import cyton_recorder
-
     threads_created = []
     original_start = threading.Thread.start
 
