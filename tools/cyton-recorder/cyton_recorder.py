@@ -100,3 +100,93 @@ class Protocol:
     def stop(self) -> bytes:
         self.transport.write(STOP_CMD)
         return self.transport.read_frame(STREAM_STOP_TIMEOUT_S)
+
+
+# ---------- Serial transport (real, background thread) ----------
+
+import serial  # pyserial
+import serial.tools.list_ports
+
+
+class SerialWorker:
+    """Owns a pyserial.Serial. Runs a background reader thread.
+
+    Implements SerialTransport. Frames are split on EOT_MARKER (b"$$$").
+    Bytes between frames are concatenated and emitted as one frame each
+    time the marker is seen.
+    """
+
+    def __init__(self, port: str) -> None:
+        self._port_name = port
+        self._ser: Optional[serial.Serial] = None
+        self._frames: "queue.Queue[bytes]" = queue.Queue()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._buffer = bytearray()
+
+    def open(self) -> None:
+        self._ser = serial.Serial(
+            port=self._port_name,
+            baudrate=BAUD_RATE,
+            timeout=SERIAL_READ_TIMEOUT_S,
+        )
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        if self._ser is not None:
+            try:
+                self._ser.close()
+            finally:
+                self._ser = None
+
+    # SerialTransport interface
+    def write(self, data: bytes) -> None:
+        if self._ser is None:
+            raise RuntimeError("SerialWorker not open")
+        self._ser.write(data)
+        self._ser.flush()
+
+    def read_frame(self, timeout_s: float) -> bytes:
+        try:
+            return self._frames.get(timeout=timeout_s)
+        except queue.Empty:
+            raise ProtocolTimeout(f"no frame within {timeout_s}s on {self._port_name}")
+
+    def drain(self) -> None:
+        # Drop any queued frames AND any buffered partial frame.
+        while True:
+            try:
+                self._frames.get_nowait()
+            except queue.Empty:
+                break
+        self._buffer.clear()
+
+    # Internal
+    def _reader_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                chunk = self._ser.read(256) if self._ser else b""
+            except (serial.SerialException, OSError):
+                break
+            if not chunk:
+                continue
+            self._buffer.extend(chunk)
+            while True:
+                idx = self._buffer.find(EOT_MARKER)
+                if idx < 0:
+                    break
+                end = idx + len(EOT_MARKER)
+                frame = bytes(self._buffer[:end])
+                del self._buffer[:end]
+                self._frames.put(frame)
+
+
+def list_candidate_ports() -> list[str]:
+    """Return all serial ports the OS reports. UI lets the user pick."""
+    return [p.device for p in serial.tools.list_ports.comports()]
