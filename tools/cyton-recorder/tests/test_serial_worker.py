@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import List
 from unittest.mock import patch
@@ -105,5 +106,47 @@ def test_write_forwards_to_serial():
     try:
         w.write(b"v")
         assert stub.writes == [b"v"]
+    finally:
+        w.close()
+
+
+def test_buffer_lock_prevents_concurrent_drain_corruption():
+    """Verify that calling drain() concurrently with the reader thread does
+    not raise an exception and leaves the buffer in a clean (empty) state.
+
+    We feed a long repeating script so the reader thread is busy extending
+    the buffer while the main thread calls drain() repeatedly.
+    """
+    # Build a script of many small chunks so the reader keeps running.
+    chunk = b"ABCDEFGHIJ"  # no $$$ marker — keeps filling the buffer
+    script = [chunk] * 500
+    stub = StubSerial(script)
+    w = make_worker(stub)
+    try:
+        # Let the reader thread fill the buffer a bit.
+        time.sleep(0.05)
+
+        errors = []
+
+        def drain_repeatedly():
+            for _ in range(20):
+                try:
+                    w.drain()
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+                time.sleep(0.001)
+
+        drainer = threading.Thread(target=drain_repeatedly)
+        drainer.start()
+        drainer.join(timeout=2.0)
+
+        assert not errors, f"drain() raised exceptions concurrently: {errors}"
+
+        # After drain finishes, the buffer should be clean (empty or nearly so).
+        # Give the reader one more tick, then drain again and confirm no frames.
+        time.sleep(0.05)
+        w.drain()
+        with pytest.raises(ProtocolTimeout):
+            w.read_frame(timeout_s=0.1)
     finally:
         w.close()

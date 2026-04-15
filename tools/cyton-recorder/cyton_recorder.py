@@ -42,7 +42,7 @@ DEFAULT_DURATION = "15 min"
 
 # Timeouts (seconds)
 HANDSHAKE_TIMEOUT_S = 5.0
-FILE_OPEN_TIMEOUT_S = 3.0
+FILE_OPEN_TIMEOUT_S = 30.0
 STREAM_STOP_TIMEOUT_S = 5.0
 
 # Serial settings
@@ -123,6 +123,7 @@ class SerialWorker:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._buffer = bytearray()
+        self._buf_lock = threading.Lock()
 
     def open(self) -> None:
         self._ser = serial.Serial(
@@ -165,7 +166,8 @@ class SerialWorker:
                 self._frames.get_nowait()
             except queue.Empty:
                 break
-        self._buffer.clear()
+        with self._buf_lock:
+            self._buffer.clear()
 
     # Internal
     def _reader_loop(self) -> None:
@@ -176,15 +178,16 @@ class SerialWorker:
                 break
             if not chunk:
                 continue
-            self._buffer.extend(chunk)
-            while True:
-                idx = self._buffer.find(EOT_MARKER)
-                if idx < 0:
-                    break
-                end = idx + len(EOT_MARKER)
-                frame = bytes(self._buffer[:end])
-                del self._buffer[:end]
-                self._frames.put(frame)
+            with self._buf_lock:
+                self._buffer.extend(chunk)
+                while True:
+                    idx = self._buffer.find(EOT_MARKER)
+                    if idx < 0:
+                        break
+                    end = idx + len(EOT_MARKER)
+                    frame = bytes(self._buffer[:end])
+                    del self._buffer[:end]
+                    self._frames.put(frame)
 
 
 def list_candidate_ports() -> list[str]:
@@ -349,6 +352,20 @@ class RecorderApp:
         self.details_text.see("end")
         self.details_text.config(state="disabled")
 
+    # ----- Async helper -----
+
+    def _run_async(self, work, on_success, on_error) -> None:
+        """Run `work()` on a background thread; call `on_success(result)` or
+        `on_error(exc)` back on the Tk main thread via root.after."""
+        def runner():
+            try:
+                result = work()
+            except Exception as exc:
+                self.root.after(0, on_error, exc)
+            else:
+                self.root.after(0, on_success, result)
+        threading.Thread(target=runner, daemon=True).start()
+
     # ----- State transitions -----
 
     def _set_state(self, new_state: State, message: str, dot_color: str) -> None:
@@ -365,19 +382,27 @@ class RecorderApp:
 
     def _auto_connect(self) -> None:
         self._set_state(State.CONNECTING, "Searching for Cyton…", "yellow")
-        self.root.update_idletasks()
         ports = list_candidate_ports()
         if not ports:
             self._on_connect_failed("No COM ports found. Plug in the dongle and click Connect.")
             return
-        port = auto_detect_port(ports)
-        if port is None:
-            self._on_connect_failed(
-                "Could not find Cyton. Turn on Cyton (PC switch), plug in dongle, click Connect."
-            )
-            return
-        self.selected_port.set(port)
-        self._open_port(port)
+
+        def work():
+            return auto_detect_port(ports)
+
+        def on_success(port):
+            if port is None:
+                self._on_connect_failed(
+                    "Could not find Cyton. Turn on Cyton (PC switch), plug in dongle, click Connect."
+                )
+            else:
+                self.selected_port.set(port)
+                self._open_port(port)
+
+        def on_error(exc):
+            self._on_connect_failed(f"Auto-detect error: {exc}")
+
+        self._run_async(work, on_success, on_error)
 
     def _manual_connect(self) -> None:
         port = self.selected_port.get()
@@ -387,7 +412,7 @@ class RecorderApp:
         self._open_port(port)
 
     def _open_port(self, port: str) -> None:
-        # Tear down any prior worker.
+        # Phase 1 (sync): tear down prior worker, construct and open new one.
         if self.worker is not None:
             self.worker.close()
             self.worker = None
@@ -395,13 +420,26 @@ class RecorderApp:
             self.worker = SerialWorker(port)
             self.worker.open()
             self.protocol = Protocol(transport=self.worker)
-            banner = self.protocol.handshake()
+        except OSError as exc:
+            self._on_connect_failed(f"Could not open {port}: {exc}")
+            return
+
+        # Phase 2 (async): run handshake on background thread so the UI stays live.
+        self._set_state(State.CONNECTING, f"Handshaking on {port}…", "yellow")
+
+        def work():
+            return self.protocol.handshake()
+
+        def on_success(banner):
             self._log_detail(f"[handshake] {banner!r}")
             self._set_state(State.READY, f"Connected on {port}. Ready to record.", "green")
             self.start_btn.config(state="normal")
             self.connect_btn.pack_forget()
-        except (ProtocolTimeout, ProtocolError, OSError) as exc:
+
+        def on_error(exc):
             self._on_connect_failed(f"Could not talk to Cyton on {port}: {exc}")
+
+        self._run_async(work, on_success, on_error)
 
     def _on_connect_failed(self, message: str) -> None:
         if self.worker is not None:
@@ -416,52 +454,65 @@ class RecorderApp:
         if self.protocol is None:
             return
         duration = self.selected_duration.get()
+        # Synchronous part: update state immediately so the UI reflects ARMING.
         self._set_state(State.ARMING, f"Opening SD file for {duration}…", "yellow")
         self.start_btn.config(state="disabled")
-        self.root.update_idletasks()
-        try:
-            response = self.protocol.arm(duration)
-            self._log_detail(f"[arm {duration}] {response!r}")
-            self.protocol.start()
-            self._log_detail("[start] sent 'b'")
-        except ProtocolTimeout:
-            messagebox.showerror(
-                "SD card error",
-                "SD card not detected, is full, or is too slow. Try a different card.",
-            )
-            self._set_state(State.READY, "Ready to record.", "green")
-            self.start_btn.config(state="normal")
-            return
-        except ProtocolError as exc:
-            messagebox.showerror("Protocol error", str(exc))
-            self._set_state(State.READY, "Ready to record.", "green")
-            self.start_btn.config(state="normal")
-            return
 
-        self.recording_started_at = time.monotonic()
-        self.recording_target_s = DURATION_SECONDS[duration]
-        self.progress.config(maximum=self.recording_target_s, value=0)
-        self.timer_label.pack()
-        self.progress.pack(pady=(0, 6))
-        self.stop_btn.pack()
-        self._set_state(State.RECORDING, "Recording in progress.", "green")
+        def work():
+            response = self.protocol.arm(duration)
+            self.protocol.start()
+            return response
+
+        def on_success(response):
+            self._log_detail(f"[arm {duration}] {response!r}")
+            self._log_detail("[start] sent 'b'")
+            # Set recording_started_at only after the board actually starts.
+            self.recording_started_at = time.monotonic()
+            self.recording_target_s = DURATION_SECONDS[duration]
+            self.progress.config(maximum=self.recording_target_s, value=0)
+            self.timer_label.pack()
+            self.progress.pack(pady=(0, 6))
+            self.stop_btn.pack()
+            self._set_state(State.RECORDING, "Recording in progress.", "green")
+
+        def on_error(exc):
+            if isinstance(exc, ProtocolTimeout):
+                messagebox.showerror(
+                    "SD card error",
+                    "SD card not detected, is full, or is too slow. Try a different card.",
+                )
+            else:
+                messagebox.showerror("Protocol error", str(exc))
+            self._set_state(State.READY, "Ready to record.", "green")
+            self.start_btn.config(state="normal")
+
+        self._run_async(work, on_success, on_error)
 
     def _on_stop(self) -> None:
         if self.protocol is None:
             return
+        # Synchronous part: update state to CLOSING immediately.  The state
+        # guard in _on_tick checks for RECORDING, so once we are CLOSING,
+        # subsequent ticks will not re-enter _on_stop.
         self._set_state(State.CLOSING, "Saving file — do not remove SD card…", "yellow")
         self.stop_btn.config(state="disabled")
-        self.root.update_idletasks()
-        try:
-            footer = self.protocol.stop()
+
+        def work():
+            return self.protocol.stop()
+
+        def on_success(footer):
             self._log_detail(f"[stop] {footer!r}")
             self._enter_done()
-        except ProtocolTimeout:
-            messagebox.showwarning(
-                "Stop timeout",
-                "File may not have closed cleanly. Wait 10 seconds before removing the SD card.",
-            )
+
+        def on_error(exc):
+            if isinstance(exc, ProtocolTimeout):
+                messagebox.showwarning(
+                    "Stop timeout",
+                    "File may not have closed cleanly. Wait 10 seconds before removing the SD card.",
+                )
             self._enter_done()
+
+        self._run_async(work, on_success, on_error)
 
     def _enter_done(self) -> None:
         self.timer_label.pack_forget()
