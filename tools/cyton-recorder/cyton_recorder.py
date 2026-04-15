@@ -190,3 +190,30 @@ class SerialWorker:
 def list_candidate_ports() -> list[str]:
     """Return all serial ports the OS reports. UI lets the user pick."""
     return [p.device for p in serial.tools.list_ports.comports()]
+
+
+def auto_detect_port(candidate_ports: list[str], worker_factory=None) -> Optional[str]:
+    """Try each candidate port; return the first that replies $$$ to 'v'.
+
+    `worker_factory(port)` returns a SerialTransport-compatible object with
+    open()/close() methods (defaults to SerialWorker). Injectable for tests.
+    """
+    if worker_factory is None:
+        worker_factory = SerialWorker
+
+    for port in candidate_ports:
+        worker = worker_factory(port)
+        try:
+            worker.open()
+        except Exception:
+            continue
+        try:
+            proto = Protocol(transport=worker)
+            try:
+                proto.handshake()
+                return port
+            except (ProtocolTimeout, ProtocolError):
+                continue
+        finally:
+            worker.close()
+    return None
