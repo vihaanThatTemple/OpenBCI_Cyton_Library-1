@@ -76,6 +76,22 @@ static void sdTruncateOrReportIncomplete(uint32_t blocksWritten) {
 #endif
 }
 
+// P2-2 / Change 3: read ADS1299 Device ID WITHOUT clobbering board.regData[].
+// Issues SDATAC first (idempotent; safe if already in SDATAC), waits 10 us,
+// then a manual RREG sequence (0x20 | addr, 0x00, read). Returns 0xFF on
+// unrecoverable error. Valid ID is 0x3E (ADS1299 8-channel variant).
+static byte diagReadAdsId(uint8_t targetSS) {
+  // SDATAC: ADS stops continuous-data framing. Idempotent per SBAS499C §9.5.2.2.
+  board.SDATAC(targetSS);
+  delayMicroseconds(10);
+  board.csLow(targetSS);       // MODE1 @ 4 MHz per csLow switch in library
+  board.xfer(0x20 | 0x00);     // RREG op for register 0x00 (ID)
+  board.xfer(0x00);             // "read 1 register" (N-1 = 0)
+  byte id = board.xfer(0x00);  // shift in the ID byte
+  board.csHigh(targetSS);
+  return id;
+}
+
 bool LED_SD_Status_Indication(uint8_t blinks_num, uint8_t blink_period_num, bool ok_indication){
   
   for(uint8_t i=0; i<blinks_num; i++){
