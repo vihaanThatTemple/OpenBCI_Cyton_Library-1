@@ -18,6 +18,8 @@ from cyton_recorder import (
         (b"$SDERR:TAIL_FAIL$$$",                          b"$SDERR:"),
         (b"$SDERR:SD_FULL$$$",                            b"$SDERR:"),
         (b"$SDERR:FILE_INCOMPLETE$$$",                    b"$SDERR:"),
+        (b"$SDERR:DURATION_CAP$$$",                       b"$SDERR:"),
+        (b"$SDERR:INVALID_SPS$$$",                        b"$SDERR:"),
         (b"initialization failed. Things to check:\n$$$", b"initialization failed"),
         (b"Could not find FAT16/FAT32\n$$$",              b"Could not find FAT16"),
         (b"createfdContiguous fail$$$",                   b"createfdContiguous fail"),
@@ -170,3 +172,14 @@ def test_parse_sd_diag_preserves_ads_id_zero():
     frame = b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x00 daisy_id=NA rtc=1 sps=250 free_blocks=100 file=OBCI_01.TXT$$$"
     diag = parse_sd_diag_frame(frame)
     assert diag.ads_id == 0, f"ads_id should be 0 (as emitted), got 0x{diag.ads_id:02X}"
+
+
+def test_parse_sd_diag_ads_id_zero_preserved_in_dataclass():
+    """Regression: ads_id=0x00 firmware emission must be stored as int 0, not masked to 0xFF.
+
+    Previously `_parse_int_field(...) or 0xFF` evaluated 0 as falsy and clobbered
+    the diagnostic value. Fixed in 5d76c6a by using an explicit None check.
+    """
+    frame = b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x00 daisy_id=NA rtc=0 sps=250 free_blocks=NA file=NA$$$"
+    diag = parse_sd_diag_frame(frame)
+    assert diag.ads_id == 0
