@@ -29,6 +29,7 @@ boolean openvol;
 boolean cardInit = false;
 boolean fileIsOpen = false;
 static bool sdFullFired = false; // P2-4: one-shot latch so SD_FULL tokens don't spray
+static uint32_t cachedTotalBlocks = 0; // P2-6: populated on first successful card.init()
 
 struct {
   uint32_t block;   // holds block number that over-ran
@@ -55,6 +56,25 @@ prog_char stopStamp[] PROGMEM = {  "%STOP AT\n"};      // used to stamp SD recor
 prog_char startStamp[] PROGMEM = {  "%START AT\n"};    // used to stamp SD record when started by PC
 
 
+
+// P2-5: on every early-close path we need the FAT directory entry to reflect the
+// actual byte count, not the pre-allocated BLOCK_COUNT*512. On SdFat forks that
+// expose truncate(), use it; otherwise fall back to remove() and warn host.
+// The Concern-5 note in the debate brief flags this build-time check: if neither
+// truncate nor remove-on-open-file is available, the offline parser is expected
+// to detect EOF via the tail-canary magic instead of trusting file size.
+static void sdTruncateOrReportIncomplete(uint32_t blocksWritten) {
+  const uint32_t realBytes = blocksWritten * 512UL;
+#if defined(SdFat_HAS_TRUNCATE)
+  if (!openfile.truncate(realBytes)) {
+    if (!board.streaming) Serial0.print("$SDERR:FILE_INCOMPLETE$$$");
+  }
+#else
+  // Best-effort: leave the file on-card; emit the token so the host flags it.
+  (void)realBytes;
+  if (!board.streaming) Serial0.print("$SDERR:FILE_INCOMPLETE$$$");
+#endif
+}
 
 bool LED_SD_Status_Indication(uint8_t blinks_num, uint8_t blink_period_num, bool ok_indication){
   
@@ -142,6 +162,9 @@ boolean setupSDcard(char limit){
           Serial0.println("Wiring is correct and a card is present.");
         }
         cardInit = true;
+        if (cachedTotalBlocks == 0) {
+          cachedTotalBlocks = card.cardSize(); // P2-6: one-shot; avoid CMD9 per arm.
+        }
       }
       if (!volume.init(card)) { // Now we will try to open the 'volume'/'partition' - it should be FAT16 or FAT32
         if(!board.streaming) {
