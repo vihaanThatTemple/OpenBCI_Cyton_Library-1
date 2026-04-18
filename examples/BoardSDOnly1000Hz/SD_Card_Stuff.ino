@@ -1,6 +1,8 @@
 // 4x block counts to accommodate 1000Hz (4x the 250Hz default sample rate)
 // Max duration is 4hr at 1000Hz. 12hr/24hr would overflow uint32_t when
 // multiplied by 512 for file allocation, so they are capped at 4hr.
+// NOTE: BLOCK_* defines kept for reference but BLOCK_COUNT is now computed
+// from channels * SPS * duration * 1.1 math (Task 6).
 #define BLOCK_5MIN    (16890 * 4)
 #define BLOCK_15MIN   (BLOCK_5MIN*3)
 #define BLOCK_30MIN   (BLOCK_15MIN*2)
@@ -29,6 +31,8 @@ int byteCounter = 0;    // used to hold position in cache
 boolean openvol;
 boolean cardInit = false;
 boolean fileIsOpen = false;
+static bool sdFullFired = false; // P2-4: one-shot latch so SD_FULL tokens don't spray
+static uint32_t cachedTotalBlocks = 0; // P2-6: populated on first successful card.init()
 
 struct {
   uint32_t block;   // holds block number that over-ran
@@ -55,6 +59,38 @@ prog_char stopStamp[] PROGMEM = {  "%STOP AT\n"};      // used to stamp SD recor
 prog_char startStamp[] PROGMEM = {  "%START AT\n"};    // used to stamp SD record when started by PC
 
 
+
+// P2-5: on every early-close path we need the FAT directory entry to reflect the
+// actual byte count, not the pre-allocated BLOCK_COUNT*512. On SdFat forks that
+// expose truncate(), use it; otherwise fall back to remove() and warn host.
+static void sdTruncateOrReportIncomplete(uint32_t blocksWritten) {
+  const uint32_t realBytes = blocksWritten * 512UL;
+#if defined(SdFat_HAS_TRUNCATE)
+  if (!openfile.truncate(realBytes)) {
+    if (!board.streaming) Serial0.print("$SDERR:FILE_INCOMPLETE$$$");
+  }
+#else
+  // Best-effort: leave the file on-card; emit the token so the host flags it.
+  (void)realBytes;
+  if (!board.streaming) Serial0.print("$SDERR:FILE_INCOMPLETE$$$");
+#endif
+}
+
+// P2-2 / Change 3: read ADS1299 Device ID WITHOUT clobbering board.regData[].
+// Issues SDATAC first (idempotent; safe if already in SDATAC), waits 10 us,
+// then a manual RREG sequence (0x20 | addr, 0x00, read). Returns 0xFF on
+// unrecoverable error. Valid ID is 0x3E (ADS1299 8-channel variant).
+static byte diagReadAdsId(uint8_t targetSS) {
+  // SDATAC: ADS stops continuous-data framing. Idempotent per SBAS499C §9.5.2.2.
+  board.SDATAC(targetSS);
+  delayMicroseconds(10);
+  board.csLow(targetSS);       // MODE1 @ 4 MHz per csLow switch in library
+  board.xfer(0x20 | 0x00);     // RREG op for register 0x00 (ID)
+  board.xfer(0x00);             // "read 1 register" (N-1 = 0)
+  byte id = board.xfer(0x00);  // shift in the ID byte
+  board.csHigh(targetSS);
+  return id;
+}
 
 bool LED_SD_Status_Indication(uint8_t blinks_num, uint8_t blink_period_num, bool ok_indication){
 
@@ -125,7 +161,51 @@ char sdProcessChar(char character) {
 }
 
 
+// P2-8 + P2-9: single-frame diag emission.
+// stage = 0 → early (before card.init): free_blocks=NA file=NA
+// stage = 1 → success: all fields resolved.
+// Note: this variant skips daisy; board.daisyPresent is always false here,
+// so daisy_id will always emit NA. The function body is unchanged from DefaultBoard.
+static void emitSdDiag(uint8_t stage) {
+  if (board.streaming) return; // do not interleave with live sample frames
+  byte adsId = diagReadAdsId(BOARD_ADS);
+  byte daisyId = 0xFF;
+  bool daisyValid = false;
+  if (board.daisyPresent) {
+    daisyId = diagReadAdsId(DAISY_ADS);
+    daisyValid = true;
+  }
+  const uint32_t freeBlocks =
+      (stage == 1 && cachedTotalBlocks > BLOCK_COUNT)
+          ? (cachedTotalBlocks - BLOCK_COUNT)
+          : 0;
+
+  Serial0.print("%SD_DIAG fw=v3.1.5-p0 ads_id=0x");
+  if (adsId < 0x10) Serial0.print('0');
+  Serial0.print(adsId, HEX);
+  Serial0.print(" daisy_id=");
+  if (daisyValid) {
+    Serial0.print("0x");
+    if (daisyId < 0x10) Serial0.print('0');
+    Serial0.print(daisyId, HEX);
+  } else {
+    Serial0.print("NA");
+  }
+  Serial0.print(" rtc=");   Serial0.print(millis());
+  Serial0.print(" sps=");   Serial0.print(board.getSampleRate());
+  if (stage == 1) {
+    Serial0.print(" free_blocks="); Serial0.print(freeBlocks);
+    Serial0.print(" file="); Serial0.print(currentFileName);
+  } else {
+    Serial0.print(" free_blocks=NA file=NA");
+  }
+  Serial0.print("$$$");
+}
+
 boolean setupSDcard(char limit){
+  // P2-1: clear stale extent cursors so an early-return cannot feed garbage to erase/writeStart.
+  bgnBlock = 0;
+  endBlock = 0;
 
   if(!cardInit){
       if(!card.init(SPI_FULL_SPEED, SD_SS)) {
@@ -133,54 +213,78 @@ boolean setupSDcard(char limit){
           Serial0.println("initialization failed. Things to check:");
           Serial0.println("* is a card is inserted?");
         }
-      //    card.init(SPI_FULL_SPEED, SD_SS);
+        emitSdDiag(0);
+        return fileIsOpen; // P2-1 + P2-11: surface diag even on card-absent.
       } else {
         if(!board.streaming) {
           Serial0.println("Wiring is correct and a card is present.");
         }
         cardInit = true;
+        if (cachedTotalBlocks == 0) {
+          cachedTotalBlocks = card.cardSize(); // P2-6: one-shot; avoid CMD9 per arm.
+        }
       }
       if (!volume.init(card)) { // Now we will try to open the 'volume'/'partition' - it should be FAT16 or FAT32
         if(!board.streaming) {
           Serial0.println("Could not find FAT16/FAT32 partition. Make sure you've formatted the card");
-          board.sendEOT();
         }
+        emitSdDiag(0);
         return fileIsOpen;
       }
    }
 
 
-
-  // use limit to determine file size
+  // Change 4: size the reservation from actual channels × SPS × duration + 10% margin.
+  // bytes_per_sample for 1000Hz variant (no aux/accel overhead):
+  //   1 header byte (2 nibbles + ',') = 3
+  //   8 channels × (5 nibbles + ',' or '\n') = 8*7 = 56
+  //   Total: 3 + 8*7 = 59  (NO +12 aux/accel overhead; this variant skips those)
+  const uint32_t bytes_per_sample = 3 + 8*7; // = 59; 1000Hz variant: no aux/accel
+  const uint32_t sps = (uint32_t)board.getSampleRate().toInt();
+  uint32_t duration_s;
   switch(limit){
-    case 'h':
-      BLOCK_COUNT = 50; break;
-    case 'a':
-      BLOCK_COUNT = 512; break;
-    case 'A':
-      BLOCK_COUNT = BLOCK_5MIN; break;
-    case 'S':
-      BLOCK_COUNT = BLOCK_15MIN; break;
-    case 'F':
-      BLOCK_COUNT = BLOCK_30MIN; break;
-    case 'G':
-      BLOCK_COUNT = BLOCK_1HR; break;
-    case 'H':
-      BLOCK_COUNT = BLOCK_2HR; break;
-    case 'J':
-      BLOCK_COUNT = BLOCK_4HR; break;
-    case 'K':  // 12hr not supported at 1000Hz (uint32_t overflow), cap at 4hr
-    case 'L':  // 24hr not supported at 1000Hz (uint32_t overflow), cap at 4hr
-      BLOCK_COUNT = BLOCK_4HR; break;
+    case 'h': duration_s = 1;           break;
+    case 'a': duration_s = 10;          break;
+    case 'A': duration_s = 5UL*60;      break;
+    case 'S': duration_s = 15UL*60;     break;
+    case 'F': duration_s = 30UL*60;     break;
+    case 'G': duration_s = 60UL*60;     break;
+    case 'H': duration_s = 2UL*60*60;   break;
+    case 'J': duration_s = 4UL*60*60;   break;
+    case 'K': // 12hr not supported at 1000Hz (uint32_t overflow), reject
+    case 'L': // 24hr not supported at 1000Hz (uint32_t overflow), reject
+      if(!board.streaming) {
+        Serial0.println("duration exceeds 4hr 1000Hz cap");
+      }
+      emitSdDiag(0);
+      return fileIsOpen;
     default:
       if(!board.streaming) {
         Serial0.println("invalid BLOCK count");
-        board.sendEOT(); // Write end of transmission because we exit here
       }
+      emitSdDiag(0);
       return fileIsOpen;
   }
-
-  Serial0.println("Sample rate: 1000Hz, 8 channels, SD-only");
+  // Defense 14: refuse if SPS parsing returned 0 (would produce BLOCK_COUNT=0 and instant SD_FULL).
+  if (sps == 0) {
+    if(!board.streaming) {
+      Serial0.print("$SDERR:INVALID_SPS$$$");
+    }
+    emitSdDiag(0);
+    return fileIsOpen;
+  }
+  const uint64_t raw_bytes  = (uint64_t)bytes_per_sample * sps * duration_s;
+  const uint64_t raw_blocks = (raw_bytes + 511ULL) / 512ULL;        // ceil
+  const uint64_t padded     = (raw_blocks * 11ULL + 9ULL) / 10ULL;  // +10% margin (ceil)
+  if (padded > 0xFFFFFFFFULL) {
+    if(!board.streaming) {
+      Serial0.println("duration exceeds uint32 block range");
+    }
+    emitSdDiag(0);
+    return fileIsOpen;
+  }
+  BLOCK_COUNT = (uint32_t)padded;
+  sdFullFired = false; // P2-4: reset one-shot at arm time
 
   incrementFileCounter();
   openvol = root.openRoot(volume);
@@ -190,18 +294,20 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.print("createfdContiguous fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-
     }
     cardInit = false;
+    emitSdDiag(0);
+    return fileIsOpen; // P2-1
   }//else{Serial0.print("got contiguous file...");delay(1);}
   // get the location of the file's blocks
   if (!openfile.contiguousRange(&bgnBlock, &endBlock)) {
     if(!board.streaming) {
       Serial0.print("get contiguousRange fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-
     }
     cardInit = false;
+    emitSdDiag(0);
+    return fileIsOpen; // P2-1
   }//else{Serial0.print("got file range...");delay(1);}
 
   // grab the Cache
@@ -214,6 +320,8 @@ boolean setupSDcard(char limit){
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
     }
     cardInit = false;
+    emitSdDiag(0);
+    return fileIsOpen; // P2-1
   }//else{Serial0.print("erased...");delay(1);}
 
   if (!card.writeStart(bgnBlock, BLOCK_COUNT)){
@@ -222,29 +330,75 @@ boolean setupSDcard(char limit){
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
     }
     cardInit = false;
-  } else{
-    fileIsOpen = true;
-    delay(1);
+    board.csHigh(SD_SS);
+    emitSdDiag(0);
+    return fileIsOpen;
   }
-  board.csHigh(SD_SS);  // release the spi
 
-  // initialize write-time overrun error counter and min/max wirte time benchmarks
+  // Change 1: offset-0 canary. SD CS is LOW, CMD25 just opened.
+  // If canary writeData fails, we're in a partially-constructed CMD25 state;
+  // clean tear-down is writeStop -> csHigh -> truncate helper -> openfile.close.
+  memset(pCache, 0x00, 512);
+  {
+    const char kMagic[16] = {'O','B','C','I','_','C','A','N','A','R','Y','_','V','0','1', 0x01};
+    memcpy(pCache + 0, kMagic, 16);
+  }
+  uint32_t canaryMillis = millis();
+  pCache[16] = (canaryMillis      ) & 0xFF;
+  pCache[17] = (canaryMillis >>  8) & 0xFF;
+  pCache[18] = (canaryMillis >> 16) & 0xFF;
+  pCache[19] = (canaryMillis >> 24) & 0xFF;
+  pCache[20] = (uint8_t)board.curSampleRate;  // SPS enum
+  pCache[21] = (uint8_t)board.daisyPresent;    // always 0 for 1000Hz variant
+  pCache[22] = (BLOCK_COUNT      ) & 0xFF;
+  pCache[23] = (BLOCK_COUNT >>  8) & 0xFF;
+  pCache[24] = (BLOCK_COUNT >> 16) & 0xFF;
+  pCache[25] = (BLOCK_COUNT >> 24) & 0xFF;
+  // 26..73: 8 channels x 6 bytes of channelSettings snapshot
+  {
+    uint16_t idx = 26;
+    for (uint8_t ch = 0; ch < 8; ch++) {
+      pCache[idx++] = board.channelSettings[ch][POWER_DOWN];
+      pCache[idx++] = board.channelSettings[ch][GAIN_SET];
+      pCache[idx++] = board.channelSettings[ch][INPUT_TYPE_SET];
+      pCache[idx++] = board.channelSettings[ch][BIAS_SET];
+      pCache[idx++] = board.channelSettings[ch][SRB2_SET];
+      pCache[idx++] = board.channelSettings[ch][SRB1_SET];
+    }
+  }
+  // Remainder stays 0x00 from memset.
+
+  if (!card.writeData(pCache)) {
+    // Canary failed -- tear CMD25 down cleanly. Don't write more.
+    card.writeStop();
+    board.csHigh(SD_SS);
+    sdTruncateOrReportIncomplete(0); // P2-5: 0 real blocks, directory entry is a lie
+    openfile.close();
+    cardInit = false;
+    fileIsOpen = false;
+    if (!board.streaming) {
+      Serial0.print("$SDERR:CANARY_FAIL$$$");
+    }
+    emitSdDiag(0);
+    return fileIsOpen;
+  }
+
+  fileIsOpen = true;
+  delay(1);
+  board.csHigh(SD_SS);
+
+  // Counters reflect that canary consumed one block already.
   overruns = 0;
   maxWriteTime = 0;
   minWriteTime = 65000;
-  byteCounter = 0;  // counter from 0 - 512
-  blockCounter = 0; // counter from 0 - BLOCK_COUNT;
+  byteCounter = 0;
+  blockCounter = 1; // canary = block 0 already written
   t = millis();     // mark recording start for elapsed time calculation
-  if(fileIsOpen == true){  // send corresponding file name to controlling program
-    if(!board.streaming) {
-      Serial0.print("Corresponding SD file ");
-      Serial0.println(currentFileName);
-      LED_SD_Status_Indication(OK_BLINKS, 250, OK_LED);
-    }
+  // P2-8: single merged diag+filename frame replaces the previous two-frame protocol.
+  if (fileIsOpen) {
+    LED_SD_Status_Indication(OK_BLINKS, 250, OK_LED);
   }
-  if(!board.streaming) {
-    board.sendEOT();
-  }
+  emitSdDiag(1);
   return fileIsOpen;
 }
 
@@ -304,8 +458,18 @@ void writeDataToSDcard(byte sampleNumber) {
 
 void writeCache(){
 
-    if(blockCounter > BLOCK_COUNT) {
-      blockCounter=0;
+    // Change 4 + P2-4: graceful stop on full reservation; one-shot so we don't spray.
+    if (blockCounter >= BLOCK_COUNT) {
+      if (!sdFullFired) {
+        sdFullFired = true;
+        if (!board.streaming) {
+          Serial0.print("$SDERR:SD_FULL$$$");
+        }
+        SDfileOpen = closeSDfile();
+        if (board.streaming) {
+          board.streamStop(); // P2-4: also halt ADS so no more samples are dropped
+        }
+      }
       return;
     }
 
@@ -332,15 +496,26 @@ void writeCache(){
     byteCounter = 0; // reset 512 byte counter for next block
     blockCounter++;    // increment BLOCK counter
 
-    if(blockCounter == BLOCK_COUNT-1){
+    if (blockCounter == BLOCK_COUNT - 2) {
       t = millis() - t;
-
-      // Time to Close the file but do not stop Streaming
-      writeFooter();
+      writeFooter(); // penultimate block = existing footer
     }
 
-    if(blockCounter == BLOCK_COUNT){
-       SDfileOpen  = closeSDfile(); // Update open-file flag
+    if (blockCounter == BLOCK_COUNT - 1) {
+      // P2-3: quiesce ADS BEFORE the final SD work so no DRDY edges fire
+      // during tail-canary writeData + closeSDfile.
+      if (board.streaming) {
+        board.stopADS(); // issues SDATAC(BOTH_ADS)
+      }
+      writeTailCanary();
+      blockCounter++; // advance past BLOCK_COUNT-1 so the equality below fires
+    }
+
+    if (blockCounter == BLOCK_COUNT) {
+      SDfileOpen = closeSDfile();
+      if (board.streaming) {
+        board.streamStop(); // P2-3: finalize transport state after file is closed
+      }
     }  // we did it!
 
 }
@@ -370,6 +545,7 @@ void incrementFileCounter(){
    //  // send corresponding file name to controlling program
    //  Serial0.print("Corresponding SD file ");Serial0.println(currentFileName);
 }
+
 
 
 
@@ -454,6 +630,34 @@ void writeFooter(){
 }
 
 
+// Change 2: tail canary at block BLOCK_COUNT-1, after writeFooter and before closeSDfile.
+// Caller must ensure SD CS is HIGH on entry (we csLow ourselves).
+// Caller must ensure ADS is in SDATAC (P2-3: stopADS() called before this).
+static void writeTailCanary() {
+  memset(pCache, 0x00, 512);
+  {
+    const char kTail[16] = {'O','B','C','I','_','T','A','I','L','_','V','0','1', 0, 0, 0};
+    memcpy(pCache, kTail, 16);
+  }
+  uint32_t ts = millis();
+  pCache[16] = (ts      ) & 0xFF;
+  pCache[17] = (ts >>  8) & 0xFF;
+  pCache[18] = (ts >> 16) & 0xFF;
+  pCache[19] = (ts >> 24) & 0xFF;
+  pCache[20] = board.sampleCounter;
+  pCache[21] = (overruns      ) & 0xFF;
+  pCache[22] = (overruns >>  8) & 0xFF;
+  pCache[23] = (overruns >> 16) & 0xFF;
+  pCache[24] = (overruns >> 24) & 0xFF;
+
+  board.csLow(SD_SS);
+  const bool ok = card.writeData(pCache);
+  board.csHigh(SD_SS);
+  if (!ok && !board.streaming) {
+    Serial0.print("$SDERR:TAIL_FAIL$$$");
+  }
+  // Regardless of outcome: fall through to closeSDfile() which does writeStop.
+}
 
 
 //    CONVERT RAW BYTE DATA TO HEX FOR SD STORAGE
