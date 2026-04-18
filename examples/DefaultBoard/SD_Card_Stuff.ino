@@ -225,8 +225,8 @@ boolean setupSDcard(char limit){
       if (!volume.init(card)) { // Now we will try to open the 'volume'/'partition' - it should be FAT16 or FAT32
         if(!board.streaming) {
           Serial0.println("Could not find FAT16/FAT32 partition. Make sure you've formatted the card");
-          emitSdDiag(0);
         }
+        emitSdDiag(0);
         return fileIsOpen;
       }
    }
@@ -257,16 +257,16 @@ boolean setupSDcard(char limit){
     default:
       if(!board.streaming) {
         Serial0.println("invalid BLOCK count");
-        emitSdDiag(0);
       }
+      emitSdDiag(0);
       return fileIsOpen;
   }
   // Defense 14: refuse if SPS parsing returned 0 (would produce BLOCK_COUNT=0 and instant SD_FULL).
   if (sps == 0) {
     if(!board.streaming) {
       Serial0.print("$SDERR:INVALID_SPS$$$");
-      emitSdDiag(0);
     }
+    emitSdDiag(0);
     return fileIsOpen;
   }
   const uint64_t raw_bytes  = (uint64_t)bytes_per_sample * sps * duration_s;
@@ -275,8 +275,8 @@ boolean setupSDcard(char limit){
   if (padded > 0xFFFFFFFFULL) {
     if(!board.streaming) {
       Serial0.println("duration exceeds uint32 block range");
-      emitSdDiag(0);
     }
+    emitSdDiag(0);
     return fileIsOpen;
   }
   BLOCK_COUNT = (uint32_t)padded;
@@ -291,9 +291,9 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.print("createfdContiguous fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-      emitSdDiag(0);
     }
     cardInit = false;
+    emitSdDiag(0);
     return fileIsOpen; // P2-1
   }//else{Serial0.print("got contiguous file...");delay(1);}
   // get the location of the file's blocks
@@ -301,9 +301,9 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.print("get contiguousRange fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-      emitSdDiag(0);
     }
     cardInit = false;
+    emitSdDiag(0);
     return fileIsOpen; // P2-1
   }//else{Serial0.print("got file range...");delay(1);}
   
@@ -315,9 +315,9 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.println("erase block fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-      emitSdDiag(0);
     }
     cardInit = false;
+    emitSdDiag(0);
     return fileIsOpen; // P2-1
   }//else{Serial0.print("erased...");delay(1);}
  
@@ -327,6 +327,9 @@ boolean setupSDcard(char limit){
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
     }
     cardInit = false;
+    board.csHigh(SD_SS);
+    emitSdDiag(0);
+    return fileIsOpen;
   } else{
     fileIsOpen = true;
     delay(1);
