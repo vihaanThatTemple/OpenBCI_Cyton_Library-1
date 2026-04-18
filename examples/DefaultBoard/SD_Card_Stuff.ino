@@ -330,18 +330,66 @@ boolean setupSDcard(char limit){
     board.csHigh(SD_SS);
     emitSdDiag(0);
     return fileIsOpen;
-  } else{
-    fileIsOpen = true;
-    delay(1);
   }
-  board.csHigh(SD_SS);  // release the spi
-  
-  // initialize write-time overrun error counter and min/max wirte time benchmarks
+
+  // Change 1: offset-0 canary. SD CS is LOW, CMD25 just opened.
+  // If canary writeData fails, we're in a partially-constructed CMD25 state;
+  // clean tear-down is writeStop -> csHigh -> truncate helper -> openfile.close.
+  memset(pCache, 0x00, 512);
+  {
+    const char kMagic[16] = {'O','B','C','I','_','C','A','N','A','R','Y','_','V','0','1', 0x01};
+    memcpy(pCache + 0, kMagic, 16);
+  }
+  uint32_t canaryMillis = millis();
+  pCache[16] = (canaryMillis      ) & 0xFF;
+  pCache[17] = (canaryMillis >>  8) & 0xFF;
+  pCache[18] = (canaryMillis >> 16) & 0xFF;
+  pCache[19] = (canaryMillis >> 24) & 0xFF;
+  pCache[20] = (uint8_t)board.curSampleRate;  // SPS enum
+  pCache[21] = (uint8_t)board.daisyPresent;    // 0 or 1
+  pCache[22] = (BLOCK_COUNT      ) & 0xFF;
+  pCache[23] = (BLOCK_COUNT >>  8) & 0xFF;
+  pCache[24] = (BLOCK_COUNT >> 16) & 0xFF;
+  pCache[25] = (BLOCK_COUNT >> 24) & 0xFF;
+  // 26..73: 8 channels x 6 bytes of channelSettings snapshot
+  {
+    uint16_t idx = 26;
+    for (uint8_t ch = 0; ch < 8; ch++) {
+      pCache[idx++] = board.channelSettings[ch][POWER_DOWN];
+      pCache[idx++] = board.channelSettings[ch][GAIN_SET];
+      pCache[idx++] = board.channelSettings[ch][INPUT_TYPE_SET];
+      pCache[idx++] = board.channelSettings[ch][BIAS_SET];
+      pCache[idx++] = board.channelSettings[ch][SRB2_SET];
+      pCache[idx++] = board.channelSettings[ch][SRB1_SET];
+    }
+  }
+  // Remainder stays 0x00 from memset.
+
+  if (!card.writeData(pCache)) {
+    // Canary failed -- tear CMD25 down cleanly. Don't write more.
+    card.writeStop();
+    board.csHigh(SD_SS);
+    sdTruncateOrReportIncomplete(0); // P2-5: 0 real blocks, directory entry is a lie
+    openfile.close();
+    cardInit = false;
+    fileIsOpen = false;
+    if (!board.streaming) {
+      Serial0.print("$SDERR:CANARY_FAIL$$$");
+    }
+    emitSdDiag(0);
+    return fileIsOpen;
+  }
+
+  fileIsOpen = true;
+  delay(1);
+  board.csHigh(SD_SS);
+
+  // Counters reflect that canary consumed one block already.
   overruns = 0;
   maxWriteTime = 0;
   minWriteTime = 65000;
-  byteCounter = 0;  // counter from 0 - 512
-  blockCounter = 0; // counter from 0 - BLOCK_COUNT;
+  byteCounter = 0;
+  blockCounter = 1; // canary = block 0 already written
   // P2-8: single merged diag+filename frame replaces the previous two-frame protocol.
   if (fileIsOpen) {
     LED_SD_Status_Indication(OK_BLINKS, 250, OK_LED);
