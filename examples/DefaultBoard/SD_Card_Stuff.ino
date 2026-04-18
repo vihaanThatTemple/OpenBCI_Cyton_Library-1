@@ -28,7 +28,6 @@ int byteCounter = 0;    // used to hold position in cache
 boolean openvol;
 boolean cardInit = false;
 boolean fileIsOpen = false;
-uint8_t BLOCK_DIV = 1; // DEFAULT VALUE
 static bool sdFullFired = false; // P2-4: one-shot latch so SD_FULL tokens don't spray
 
 struct {
@@ -113,19 +112,9 @@ char sdProcessChar(char character) {
         case 'b':
             if(SDfileOpen) {
                 stampSD(DEACTIVATE);
-            } 
+            }
             break;
 
-        case 'c':
-        	   // Consider 8-Channels - Single Cyton Board
-            BLOCK_DIV = 2;
-            break;
-            
-         case 'C': 
-            // Consider 16-Channels - Daisy attached on Cyton Board
-            BLOCK_DIV = 1;
-            break;
-            
         default:
             break;
         
