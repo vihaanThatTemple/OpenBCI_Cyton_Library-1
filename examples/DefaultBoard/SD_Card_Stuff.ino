@@ -76,21 +76,18 @@ static void sdTruncateOrReportIncomplete(uint32_t blocksWritten) {
 #endif
 }
 
-// P2-2 / Change 3: read ADS1299 Device ID WITHOUT clobbering board.regData[].
-// Issues SDATAC first (idempotent; safe if already in SDATAC), waits 10 us,
-// then a manual RREG sequence (0x20 | addr, 0x00, read). Returns 0xFF on
-// unrecoverable error. Valid ID is 0x3E (ADS1299 8-channel variant).
+// P2-2 revised: use the library's proven RREG() after an explicit SDATAC.
+// RREG writes the returned byte into board.regData[ID_REG] as a side effect;
+// since the byte IS the correct ID register value, this isn't a real clobber —
+// just ensures the mirror stays in sync. See forum thread 3775 debug log
+// 2026-04-18: the earlier manual xfer sequence returned 0xFF at runtime even
+// though it mirrored RREG's implementation byte-for-byte. Attribute to an SPI
+// state nuance between SD writes and ADS reads we don't fully characterize;
+// the library's RREG handles it correctly in existing firmware paths.
 static byte diagReadAdsId(uint8_t targetSS) {
-  // SDATAC: ADS stops continuous-data framing. Idempotent per SBAS499C §9.5.2.2.
-  board.SDATAC(targetSS);
-  board.channelDataAvailable = false; // B1: clear stale DRDY flag after SDATAC
-  delayMicroseconds(10);
-  board.csLow(targetSS);       // MODE1 @ 4 MHz per csLow switch in library
-  board.xfer(0x20 | 0x00);     // RREG op for register 0x00 (ID)
-  board.xfer(0x00);             // "read 1 register" (N-1 = 0)
-  byte id = board.xfer(0x00);  // shift in the ID byte
-  board.csHigh(targetSS);
-  return id;
+  board.SDATAC(targetSS);                   // ensure ADS is in SDATAC (idempotent)
+  board.channelDataAvailable = false;       // B1: clear stale DRDY flag
+  return board.RREG(ID_REG, targetSS);      // proven library read; writes regData[ID_REG]
 }
 
 bool LED_SD_Status_Indication(uint8_t blinks_num, uint8_t blink_period_num, bool ok_indication){
