@@ -581,6 +581,14 @@ class RecorderApp:
         def on_success(response):
             self._log_detail(f"[arm {duration}] {response!r}")
             self._log_detail("[start] sent 'b'")
+            # Surface diag info in the status label on happy-path arm.
+            diag_msg = "Recording in progress."
+            if self.protocol is not None and self.protocol.last_diag is not None:
+                d = self.protocol.last_diag
+                diag_msg = (
+                    f"Recording: {d.file} · SPS={d.sps} · "
+                    f"free={d.free_blocks or 'N/A'} blocks · ADS=0x{d.ads_id:02X}"
+                )
             # Set recording_started_at only after the board actually starts.
             self.recording_started_at = time.monotonic()
             self.recording_target_s = DURATION_SECONDS[duration]
@@ -588,9 +596,18 @@ class RecorderApp:
             self.timer_label.pack()
             self.progress.pack(pady=(0, 6))
             self.stop_btn.pack()
-            self._set_state(State.RECORDING, "Recording in progress.", "green")
+            self._set_state(State.RECORDING, diag_msg, "green")
 
         def on_error(exc):
+            if isinstance(exc, SDCardError):
+                messagebox.showerror(
+                    "SD card error",
+                    f"SD failure: {exc.token.decode(errors='replace')}\n\n"
+                    f"Frame: {exc.frame[:120]!r}",
+                )
+                self._set_state(State.SD_FAILED, "SD card failure — see details.", "red")
+                self.start_btn.config(state="normal")
+                return
             if isinstance(exc, ProtocolTimeout):
                 messagebox.showerror(
                     "SD card error",
@@ -620,6 +637,20 @@ class RecorderApp:
             self._enter_done()
 
         def on_error(exc):
+            if isinstance(exc, SDCardError):
+                messagebox.showerror(
+                    "SD card error",
+                    f"SD failure during stop: {exc.token.decode(errors='replace')}\n\n"
+                    f"Frame: {exc.frame[:120]!r}",
+                )
+                self._set_state(State.SD_FAILED, "SD card failure — see details.", "red")
+                self.stop_btn.pack_forget()
+                self.stop_btn.config(state="normal")
+                self.timer_label.pack_forget()
+                self.progress.pack_forget()
+                self.recording_started_at = None
+                self.start_btn.config(state="normal")
+                return
             if isinstance(exc, (ProtocolTimeout, OSError)):
                 messagebox.showwarning(
                     "Stop timeout",
