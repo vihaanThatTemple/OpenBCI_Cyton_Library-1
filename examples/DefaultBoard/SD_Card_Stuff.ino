@@ -432,7 +432,8 @@ void writeCache(){
     }
     
     if(blockCounter == BLOCK_COUNT){
-       SDfileOpen  = closeSDfile(); // Update open-file flag     
+       SDfileOpen  = closeSDfile(); // Update open-file flag
+       if (board.streaming) board.streamStop(); // P2-3 brought forward: halt ADS so no extra writeCache can trip SD_FULL guard
     }  // we did it!
     
 }
