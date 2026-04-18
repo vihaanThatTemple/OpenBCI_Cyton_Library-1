@@ -337,29 +337,38 @@ boolean OpenBCI_32bit_Library::processChar(char character)
 
     // STREAM DATA AND FILTER COMMANDS
     case OPENBCI_STREAM_START: // stream data
-      if (curAccelMode == ACCEL_MODE_ON)
-      {
-        enable_accel(RATE_25HZ);
-      } // fire up the accelerometer if you want it
+    {
       wifi.tx = commandFromSPI;
       if (wifi.present && wifi.tx)
       {
         wifi.sendStringLast("Stream started");
         iSerial0.tx = false;
       }
-      // Reads if the command is not from the SPI port and we are not in debug mode
-      if (!commandFromSPI && !iSerial1.tx)
+      // PR #96 + P2-7: on BLE / dongle paths, refuse (rather than silently downclock)
+      // when SPS > 250. Refusal path explicitly disables accel so a prior enable
+      // does not leak INT1 traffic onto the SPI bus.
+      const boolean isSpiOrDebug = commandFromSPI || iSerial1.tx;
+      if (!isSpiOrDebug && curSampleRate != SAMPLE_RATE_250)
       {
-        // If the sample rate is higher than 250, we need to drop down to 250Hz
-        //  to not break the RFduino system that can't handle above 250SPS.
-        if (curSampleRate != SAMPLE_RATE_250)
+        const boolean isBleOrDongle = !wifi.present; // wifi absent ⇒ BLE or classic RFduino dongle
+        if (isBleOrDongle)
         {
-          streamSafeSetSampleRate(SAMPLE_RATE_250);
-          delay(50);
+          printAll("Failure: cannot stream over BLE at SPS > 250");
+          sendEOT();
+          disable_accel();
+          break; // do not call streamStart; leave ADS in SDATAC
         }
+        // Wifi path: preserve existing silent-downclock behavior (out of scope for this P0).
+        streamSafeSetSampleRate(SAMPLE_RATE_250);
+        delay(50);
       }
-      streamStart(); // turn on the fire hose
+      if (curAccelMode == ACCEL_MODE_ON)
+      {
+        enable_accel(RATE_25HZ);
+      }
+      streamStart();
       break;
+    }
     case OPENBCI_STREAM_STOP: // stop streaming data
       if (curAccelMode == ACCEL_MODE_ON)
       {
