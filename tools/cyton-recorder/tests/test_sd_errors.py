@@ -105,3 +105,60 @@ def test_stop_returns_footer_on_success(fake_serial):
     fake_serial.queue_response(b"SamplingRate: 250Hz\nOverruns: 0\n$$$")
     proto = Protocol(transport=fake_serial)
     assert proto.stop().endswith(b"$$$")
+
+
+# ---------- Task 13: %SD_DIAG parser tests ----------
+
+from cyton_recorder import parse_sd_diag_frame, SdDiag
+
+
+def test_parse_sd_diag_happy_path():
+    frame = (b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x3E daisy_id=NA rtc=1234567 "
+             b"sps=250 free_blocks=31116287 file=OBCI_42.TXT$$$")
+    diag = parse_sd_diag_frame(frame)
+    assert diag.fw == "v3.1.5-p0"
+    assert diag.ads_id == 0x3E
+    assert diag.daisy_id is None
+    assert diag.rtc_ms == 1234567
+    assert diag.sps == 250
+    assert diag.free_blocks == 31116287
+    assert diag.file == "OBCI_42.TXT"
+
+
+def test_parse_sd_diag_with_daisy():
+    frame = b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x3E daisy_id=0x3E rtc=1 sps=1000 free_blocks=100 file=OBCI_01.TXT$$$"
+    diag = parse_sd_diag_frame(frame)
+    assert diag.daisy_id == 0x3E
+
+
+def test_parse_sd_diag_na_fields():
+    frame = b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x3E daisy_id=NA rtc=1 sps=250 free_blocks=NA file=NA$$$"
+    diag = parse_sd_diag_frame(frame)
+    assert diag.free_blocks is None
+    assert diag.file is None
+
+
+def test_arm_raises_SDCardError_on_bad_ads_id(fake_serial):
+    # P2-10: ads_id != 0x3E should raise
+    fake_serial.queue_response(b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x00 daisy_id=NA rtc=1 sps=250 free_blocks=100 file=OBCI_01.TXT$$$")
+    proto = Protocol(transport=fake_serial)
+    with pytest.raises(SDCardError) as exc:
+        proto.arm("15 min")
+    assert b"ads_id" in exc.value.token or b"ADS_ID" in exc.value.token
+
+
+def test_arm_raises_SDCardError_on_bad_daisy_id(fake_serial):
+    fake_serial.queue_response(b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x3E daisy_id=0xFF rtc=1 sps=250 free_blocks=100 file=OBCI_01.TXT$$$")
+    proto = Protocol(transport=fake_serial)
+    with pytest.raises(SDCardError):
+        proto.arm("15 min")
+
+
+def test_arm_returns_diag_on_healthy_frame(fake_serial):
+    ok = b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x3E daisy_id=NA rtc=1 sps=250 free_blocks=100 file=OBCI_01.TXT$$$"
+    fake_serial.queue_response(ok)
+    proto = Protocol(transport=fake_serial)
+    result = proto.arm("15 min")
+    assert result == ok
+    assert proto.last_diag is not None
+    assert proto.last_diag.file == "OBCI_01.TXT"

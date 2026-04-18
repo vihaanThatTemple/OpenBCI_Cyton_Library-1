@@ -98,6 +98,48 @@ def _scan_for_sd_error(frame: bytes) -> bytes | None:
     return None
 
 
+# ---------- SD diagnostics dataclass + parser ----------
+
+@dataclass
+class SdDiag:
+    """Parsed %SD_DIAG frame emitted by firmware at arm time."""
+    fw: str
+    ads_id: int
+    daisy_id: int | None        # None when daisy not present
+    rtc_ms: int
+    sps: int
+    free_blocks: int | None     # None if firmware emitted NA (pre-init failure)
+    file: str | None             # None if firmware emitted NA
+
+
+_DIAG_PREFIX = b"%SD_DIAG "
+_EXPECTED_ADS_ID = 0x3E
+
+
+def _parse_int_field(raw: str) -> int | None:
+    if raw == "NA":
+        return None
+    if raw.startswith("0x") or raw.startswith("0X"):
+        return int(raw, 16)
+    return int(raw)
+
+
+def parse_sd_diag_frame(frame: bytes) -> SdDiag:
+    if not frame.startswith(_DIAG_PREFIX):
+        raise ValueError(f"not a %SD_DIAG frame: {frame[:40]!r}")
+    body = frame[len(_DIAG_PREFIX):].rstrip(b"$").decode(errors="replace")
+    fields = dict(kv.split("=", 1) for kv in body.split() if "=" in kv)
+    return SdDiag(
+        fw=fields.get("fw", ""),
+        ads_id=_parse_int_field(fields.get("ads_id", "0xFF")) or 0xFF,
+        daisy_id=_parse_int_field(fields.get("daisy_id", "NA")),
+        rtc_ms=_parse_int_field(fields.get("rtc", "0")) or 0,
+        sps=_parse_int_field(fields.get("sps", "0")) or 0,
+        free_blocks=_parse_int_field(fields.get("free_blocks", "NA")),
+        file=(None if fields.get("file", "NA") == "NA" else fields.get("file")),
+    )
+
+
 # ---------- Serial transport interface ----------
 
 class SerialTransport(TypingProtocol):
@@ -120,6 +162,7 @@ class SerialTransport(TypingProtocol):
 @dataclass
 class Protocol:
     transport: SerialTransport
+    last_diag: SdDiag | None = None
 
     def handshake(self) -> bytes:
         self.transport.drain()
@@ -135,6 +178,14 @@ class Protocol:
         tok = _scan_for_sd_error(frame)
         if tok is not None:
             raise SDCardError(tok, frame)
+        # P2-10: validate ADS/daisy device IDs if this is a diag frame.
+        if frame.startswith(_DIAG_PREFIX):
+            diag = parse_sd_diag_frame(frame)
+            self.last_diag = diag
+            if diag.ads_id != _EXPECTED_ADS_ID:
+                raise SDCardError(b"bad ads_id", frame)
+            if diag.daisy_id is not None and diag.daisy_id != _EXPECTED_ADS_ID:
+                raise SDCardError(b"bad daisy_id", frame)
         return frame
 
     def start(self) -> None:
