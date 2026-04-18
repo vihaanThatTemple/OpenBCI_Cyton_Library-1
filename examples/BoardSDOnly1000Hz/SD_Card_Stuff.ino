@@ -83,6 +83,7 @@ static void sdTruncateOrReportIncomplete(uint32_t blocksWritten) {
 static byte diagReadAdsId(uint8_t targetSS) {
   // SDATAC: ADS stops continuous-data framing. Idempotent per SBAS499C §9.5.2.2.
   board.SDATAC(targetSS);
+  board.channelDataAvailable = false; // B1: clear stale DRDY flag after SDATAC
   delayMicroseconds(10);
   board.csLow(targetSS);       // MODE1 @ 4 MHz per csLow switch in library
   board.xfer(0x20 | 0x00);     // RREG op for register 0x00 (ID)
