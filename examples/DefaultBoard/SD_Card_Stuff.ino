@@ -539,16 +539,26 @@ void writeCache(){
     byteCounter = 0; // reset 512 byte counter for next block
     blockCounter++;    // increment BLOCK counter
     
-    if(blockCounter == BLOCK_COUNT-1){
+    if (blockCounter == BLOCK_COUNT - 2) {
       t = millis() - t;
-
-      // Time to Close the file but do not stop Streaming 
-      writeFooter();
+      writeFooter(); // penultimate block = existing footer
     }
-    
-    if(blockCounter == BLOCK_COUNT){
-       SDfileOpen  = closeSDfile(); // Update open-file flag
-       if (board.streaming) board.streamStop(); // P2-3 brought forward: halt ADS so no extra writeCache can trip SD_FULL guard
+
+    if (blockCounter == BLOCK_COUNT - 1) {
+      // P2-3: quiesce ADS BEFORE the final SD work so no DRDY edges fire
+      // during tail-canary writeData + closeSDfile.
+      if (board.streaming) {
+        board.stopADS(); // issues SDATAC(BOTH_ADS)
+      }
+      writeTailCanary();
+      blockCounter++; // advance past BLOCK_COUNT-1 so the equality below fires
+    }
+
+    if (blockCounter == BLOCK_COUNT) {
+      SDfileOpen = closeSDfile();
+      if (board.streaming) {
+        board.streamStop(); // P2-3: finalize transport state after file is closed
+      }
     }  // we did it!
     
 }
@@ -665,6 +675,34 @@ void writeFooter(){
 }
 
 
+// Change 2: tail canary at block BLOCK_COUNT-1, after writeFooter and before closeSDfile.
+// Caller must ensure SD CS is HIGH on entry (we csLow ourselves).
+// Caller must ensure ADS is in SDATAC (P2-3: stopADS() called before this).
+static void writeTailCanary() {
+  memset(pCache, 0x00, 512);
+  {
+    const char kTail[16] = {'O','B','C','I','_','T','A','I','L','_','V','0','1', 0, 0, 0};
+    memcpy(pCache, kTail, 16);
+  }
+  uint32_t ts = millis();
+  pCache[16] = (ts      ) & 0xFF;
+  pCache[17] = (ts >>  8) & 0xFF;
+  pCache[18] = (ts >> 16) & 0xFF;
+  pCache[19] = (ts >> 24) & 0xFF;
+  pCache[20] = board.sampleCounter;
+  pCache[21] = (overruns      ) & 0xFF;
+  pCache[22] = (overruns >>  8) & 0xFF;
+  pCache[23] = (overruns >> 16) & 0xFF;
+  pCache[24] = (overruns >> 24) & 0xFF;
+
+  board.csLow(SD_SS);
+  const bool ok = card.writeData(pCache);
+  board.csHigh(SD_SS);
+  if (!ok && !board.streaming) {
+    Serial0.print("$SDERR:TAIL_FAIL$$$");
+  }
+  // Regardless of outcome: fall through to closeSDfile() which does writeStop.
+}
 
 
 //    CONVERT RAW BYTE DATA TO HEX FOR SD STORAGE
