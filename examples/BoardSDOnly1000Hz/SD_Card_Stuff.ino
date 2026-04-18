@@ -254,7 +254,7 @@ boolean setupSDcard(char limit){
     case 'K': // 12hr not supported at 1000Hz (uint32_t overflow), reject
     case 'L': // 24hr not supported at 1000Hz (uint32_t overflow), reject
       if(!board.streaming) {
-        Serial0.println("duration exceeds 4hr 1000Hz cap");
+        Serial0.print("$SDERR:DURATION_CAP$$$");
       }
       emitSdDiag(0);
       return fileIsOpen;
