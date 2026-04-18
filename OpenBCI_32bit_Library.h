@@ -290,6 +290,12 @@ public:
   void    writeTimeCurrentWifi(uint32_t newTime);
 // #endif
 
+  // SPI primitives exposed for low-level sketch code (diagnostic canary reads, etc.).
+  // Use with care; SDATAC/RDATAC framing state must be maintained by the caller.
+  byte    RREG(byte,int);
+  void    SDATAC(int);
+  byte    xfer(byte);
+
 private:
 
   byte    ADS_getDeviceID(int);
@@ -330,9 +336,7 @@ private:
   void    RDATA(int);   // read data one-shot
   void    RDATAC(int);  // go into read data continuous mode
   void    RESET(int);   // set all register values to default
-  byte    RREG(byte,int);            // read one ADS register
   void    RREGS(byte,byte,int);      // read multiple ADS registers
-  void    SDATAC(int);  // get out of read data continuous mode
   void    sendChannelDataSerial(PACKET_TYPE);
   void    sendChannelDataSerialBLE(PACKET_TYPE packetType);
   void    sendTimeWithAccelSerial(void);
@@ -343,7 +347,6 @@ private:
   void    WAKEUP(int);  // get out of low power mode
   void    WREG(byte,byte,int);       // write one ADS register
   void    WREGS(byte,byte,int);      // write multiple ADS registers
-  byte    xfer(byte);        // SPI Transfer function
 
   // Variables
   boolean commandFromSPI;

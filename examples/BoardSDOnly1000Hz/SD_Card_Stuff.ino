@@ -241,7 +241,7 @@ boolean setupSDcard(char limit){
   //   8 channels × (5 nibbles + ',' or '\n') = 8*7 = 56
   //   Total: 3 + 8*7 = 59  (NO +12 aux/accel overhead; this variant skips those)
   const uint32_t bytes_per_sample = 3 + 8*7; // = 59; 1000Hz variant: no aux/accel
-  const uint32_t sps = (uint32_t)board.getSampleRate().toInt();
+  const uint32_t sps = (uint32_t)atoi(board.getSampleRate());
   uint32_t duration_s;
   switch(limit){
     case 'h': duration_s = 1;           break;
@@ -583,8 +583,7 @@ void writeFooter(){
     pCache[byteCounter] = pgm_read_byte_near(samplingFreq+i);
     byteCounter++;
   }
-  String daqFreq = board.getSampleRate();
-  convertToHex(daqFreq.toInt(), 4, false);
+  convertToHex(atoi(board.getSampleRate()), 4, false);
 
   for(int i=0; i<17; i++){
     pCache[byteCounter] = pgm_read_byte_near(elapsedTime+i);

@@ -242,7 +242,7 @@ boolean setupSDcard(char limit){
   //   16-ch daisy: 3 + 16*7 = 115
   // Add 12 bytes/sample of worst-case aux/accel overhead to stay conservative.
   const uint32_t bytes_per_sample = board.daisyPresent ? (3 + 16*7 + 12) : (3 + 8*7 + 12);
-  const uint32_t sps = (uint32_t)board.getSampleRate().toInt();
+  const uint32_t sps = (uint32_t)atoi(board.getSampleRate());
   uint32_t duration_s;
   switch(limit){
     case 'h': duration_s = 1;           break;
@@ -628,8 +628,7 @@ void writeFooter(){
     pCache[byteCounter] = pgm_read_byte_near(samplingFreq+i);
     byteCounter++;
   }
-  String daqFreq = board.getSampleRate();
-  convertToHex(daqFreq.toInt(), 4, false);
+  convertToHex(atoi(board.getSampleRate()), 4, false);
   
   for(int i=0; i<17; i++){
     pCache[byteCounter] = pgm_read_byte_near(elapsedTime+i);
