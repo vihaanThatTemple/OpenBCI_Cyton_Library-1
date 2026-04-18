@@ -29,6 +29,7 @@ boolean openvol;
 boolean cardInit = false;
 boolean fileIsOpen = false;
 uint8_t BLOCK_DIV = 1; // DEFAULT VALUE
+static bool sdFullFired = false; // P2-4: one-shot latch so SD_FULL tokens don't spray
 
 struct {
   uint32_t block;   // holds block number that over-ran
@@ -164,35 +165,53 @@ boolean setupSDcard(char limit){
 
 
        
-  // use limit to determine file size
+  // Change 4: size the reservation from actual channels × SPS × duration + 10% margin.
+  // bytes_per_sample is the hex-ASCII volume emitted by writeDataToSDcard():
+  //   1 header byte (2 nibbles + ',') = 3
+  //   N channels × (5 nibbles + ',' or '\n') = N*6 + N (comma/newline)
+  //   8-ch board: 3 + 8*7 = 59
+  //   16-ch daisy: 3 + 16*7 = 115
+  // Add 12 bytes/sample of worst-case aux/accel overhead to stay conservative.
+  const uint32_t bytes_per_sample = board.daisyPresent ? (3 + 16*7 + 12) : (3 + 8*7 + 12);
+  const uint32_t sps = (uint32_t)board.getSampleRate().toInt();
+  uint32_t duration_s;
   switch(limit){
-    case 'h':
-      BLOCK_COUNT = 50/BLOCK_DIV; break;
-    case 'a':
-      BLOCK_COUNT = 512/BLOCK_DIV; break;
-    case 'A':
-      BLOCK_COUNT = BLOCK_5MIN/BLOCK_DIV; break;
-    case 'S':
-      BLOCK_COUNT = BLOCK_15MIN/BLOCK_DIV; break;
-    case 'F':
-      BLOCK_COUNT = BLOCK_30MIN/BLOCK_DIV; break;
-    case 'G':
-      BLOCK_COUNT = BLOCK_1HR/BLOCK_DIV; break;
-    case 'H':
-      BLOCK_COUNT = BLOCK_2HR/BLOCK_DIV; break;
-    case 'J':
-      BLOCK_COUNT = BLOCK_4HR/BLOCK_DIV; break;
-    case 'K':
-      BLOCK_COUNT = BLOCK_12HR/BLOCK_DIV; break;
-    case 'L':
-      BLOCK_COUNT = BLOCK_24HR/BLOCK_DIV; break;
+    case 'h': duration_s = 1;           break;
+    case 'a': duration_s = 10;          break;
+    case 'A': duration_s = 5UL*60;      break;
+    case 'S': duration_s = 15UL*60;     break;
+    case 'F': duration_s = 30UL*60;     break;
+    case 'G': duration_s = 60UL*60;     break;
+    case 'H': duration_s = 2UL*60*60;   break;
+    case 'J': duration_s = 4UL*60*60;   break;
+    case 'K': duration_s = 12UL*60*60;  break;
+    case 'L': duration_s = 24UL*60*60;  break;
     default:
       if(!board.streaming) {
         Serial0.println("invalid BLOCK count");
-        board.sendEOT(); // Write end of transmission because we exit here
+        board.sendEOT();
       }
       return fileIsOpen;
   }
+  // Defense 14: refuse if SPS parsing returned 0 (would produce BLOCK_COUNT=0 and instant SD_FULL).
+  if (sps == 0) {
+    if(!board.streaming) {
+      Serial0.print("$SDERR:INVALID_SPS$$$");
+    }
+    return fileIsOpen;
+  }
+  const uint64_t raw_bytes  = (uint64_t)bytes_per_sample * sps * duration_s;
+  const uint64_t raw_blocks = (raw_bytes + 511ULL) / 512ULL;        // ceil
+  const uint64_t padded     = (raw_blocks * 11ULL + 9ULL) / 10ULL;  // +10% margin (ceil)
+  if (padded > 0xFFFFFFFFULL) {
+    if(!board.streaming) {
+      Serial0.println("duration exceeds uint32 block range");
+      board.sendEOT();
+    }
+    return fileIsOpen;
+  }
+  BLOCK_COUNT = (uint32_t)padded;
+  sdFullFired = false; // P2-4: reset one-shot at arm time
 
  
   incrementFileCounter();
@@ -367,8 +386,18 @@ void writeDataToSDcard(byte sampleNumber){
 
 void writeCache(){
     
-    if(blockCounter > BLOCK_COUNT) {
-      blockCounter=0; 
+    // Change 4 + P2-4: graceful stop on full reservation; one-shot so we don't spray.
+    if (blockCounter >= BLOCK_COUNT) {
+      if (!sdFullFired) {
+        sdFullFired = true;
+        if (!board.streaming) {
+          Serial0.print("$SDERR:SD_FULL$$$");
+        }
+        SDfileOpen = closeSDfile();
+        if (board.streaming) {
+          board.streamStop(); // P2-4: also halt ADS so no more samples are dropped
+        }
+      }
       return;
     }
     
