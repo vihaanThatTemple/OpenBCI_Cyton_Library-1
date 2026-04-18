@@ -58,6 +58,46 @@ class ProtocolTimeout(ProtocolError):
     """Board did not return $$$ within the expected window."""
 
 
+class SDCardError(ProtocolError):
+    """Firmware emitted a known SD-failure token inside an arm/start/stop response.
+
+    The firmware surfaces SD-layer failures (card init, FAT init, pre-allocation,
+    erase, writeStart, per-block writeData, BLOCK_COUNT exhaustion, BLE-guard
+    refusal) with stable ASCII tokens. See SD_FAIL_TOKENS for the list.
+    """
+
+    def __init__(self, token: bytes, frame: bytes) -> None:
+        super().__init__(f"{token.decode(errors='replace')}: {frame[:120]!r}")
+        self.token = token
+        self.frame = frame
+
+
+# Stable firmware failure tokens. Order irrelevant; first match wins.
+# Structured tokens (`$SDERR:*`) are emitted by the P0 patches; the plain
+# strings below are pre-existing emissions left intact by the patches.
+SD_FAIL_TOKENS: tuple[bytes, ...] = (
+    b"$SDERR:",                    # family prefix: CANARY_FAIL, TAIL_FAIL, SD_FULL, FILE_INCOMPLETE
+    b"initialization failed",      # SD_Card_Stuff.ino:143 (card.init fail)
+    b"Could not find FAT16",       # :155 (volume.init fail)
+    b"createfdContiguous fail",    # :201
+    b"get contiguousRange fail",   # :210
+    b"erase block fail",           # :223
+    b"writeStart fail",            # :231
+    b"block write fail",           # :372
+    b"invalid BLOCK count",        # :188
+    b"duration exceeds uint32",    # new (Change 4 overflow guard)
+    b"Failure: cannot stream",     # new (Change 5 BLE-guard refusal)
+)
+
+
+def _scan_for_sd_error(frame: bytes) -> bytes | None:
+    """Return the first known failure token found in `frame`, else None."""
+    for tok in SD_FAIL_TOKENS:
+        if tok in frame:
+            return tok
+    return None
+
+
 # ---------- Serial transport interface ----------
 
 class SerialTransport(TypingProtocol):
