@@ -131,15 +131,34 @@ class Protocol:
             raise ValueError(f"Unknown duration: {duration_label!r}")
         self.transport.drain()
         self.transport.write(DURATION_COMMANDS[duration_label])
-        return self.transport.read_frame(FILE_OPEN_TIMEOUT_S)
+        frame = self.transport.read_frame(FILE_OPEN_TIMEOUT_S)
+        tok = _scan_for_sd_error(frame)
+        if tok is not None:
+            raise SDCardError(tok, frame)
+        return frame
 
     def start(self) -> None:
-        # 'b' produces no $$$ response — streaming begins silently.
+        # Happy path: 'b' produces no response.
+        # PR#96 guard / Change 5 path: board emits a single failure frame.
+        self.transport.drain()
         self.transport.write(START_CMD)
+        try:
+            frame = self.transport.read_frame(timeout_s=0.5)
+        except ProtocolTimeout:
+            return  # silent start — normal
+        tok = _scan_for_sd_error(frame)
+        if tok is not None:
+            raise SDCardError(tok, frame)
+        # Unexpected non-error frame after 'b'.
+        raise ProtocolError(f"unexpected frame on stream-start: {frame!r}")
 
     def stop(self) -> bytes:
         self.transport.write(STOP_CMD)
-        return self.transport.read_frame(STREAM_STOP_TIMEOUT_S)
+        frame = self.transport.read_frame(STREAM_STOP_TIMEOUT_S)
+        tok = _scan_for_sd_error(frame)
+        if tok is not None:
+            raise SDCardError(tok, frame)
+        return frame
 
 
 # ---------- Serial transport (real, background thread) ----------
