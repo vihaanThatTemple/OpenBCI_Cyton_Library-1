@@ -161,6 +161,45 @@ char sdProcessChar(char character) {
 }
 
 
+// P2-8 + P2-9: single-frame diag emission.
+// stage = 0 → early (before card.init): free_blocks=NA file=NA
+// stage = 1 → success: all fields resolved.
+static void emitSdDiag(uint8_t stage) {
+  if (board.streaming) return; // do not interleave with live sample frames
+  byte adsId = diagReadAdsId(BOARD_ADS);
+  byte daisyId = 0xFF;
+  bool daisyValid = false;
+  if (board.daisyPresent) {
+    daisyId = diagReadAdsId(DAISY_ADS);
+    daisyValid = true;
+  }
+  const uint32_t freeBlocks =
+      (stage == 1 && cachedTotalBlocks > BLOCK_COUNT)
+          ? (cachedTotalBlocks - BLOCK_COUNT)
+          : 0;
+
+  Serial0.print("%SD_DIAG fw=v3.1.5-p0 ads_id=0x");
+  if (adsId < 0x10) Serial0.print('0');
+  Serial0.print(adsId, HEX);
+  Serial0.print(" daisy_id=");
+  if (daisyValid) {
+    Serial0.print("0x");
+    if (daisyId < 0x10) Serial0.print('0');
+    Serial0.print(daisyId, HEX);
+  } else {
+    Serial0.print("NA");
+  }
+  Serial0.print(" rtc=");   Serial0.print(millis());
+  Serial0.print(" sps=");   Serial0.print(board.getSampleRate());
+  if (stage == 1) {
+    Serial0.print(" free_blocks="); Serial0.print(freeBlocks);
+    Serial0.print(" file="); Serial0.print(currentFileName);
+  } else {
+    Serial0.print(" free_blocks=NA file=NA");
+  }
+  Serial0.print("$$$");
+}
+
 boolean setupSDcard(char limit){
   // P2-1: clear stale extent cursors so an early-return cannot feed garbage to erase/writeStart.
   bgnBlock = 0;
@@ -172,7 +211,8 @@ boolean setupSDcard(char limit){
           Serial0.println("initialization failed. Things to check:");
           Serial0.println("* is a card is inserted?");
         }
-      //    card.init(SPI_FULL_SPEED, SD_SS);
+        emitSdDiag(0);
+        return fileIsOpen; // P2-1 + P2-11: surface diag even on card-absent.
       } else {
         if(!board.streaming) {
           Serial0.println("Wiring is correct and a card is present.");
@@ -185,7 +225,7 @@ boolean setupSDcard(char limit){
       if (!volume.init(card)) { // Now we will try to open the 'volume'/'partition' - it should be FAT16 or FAT32
         if(!board.streaming) {
           Serial0.println("Could not find FAT16/FAT32 partition. Make sure you've formatted the card");
-          board.sendEOT();
+          emitSdDiag(0);
         }
         return fileIsOpen;
       }
@@ -217,7 +257,7 @@ boolean setupSDcard(char limit){
     default:
       if(!board.streaming) {
         Serial0.println("invalid BLOCK count");
-        board.sendEOT();
+        emitSdDiag(0);
       }
       return fileIsOpen;
   }
@@ -225,6 +265,7 @@ boolean setupSDcard(char limit){
   if (sps == 0) {
     if(!board.streaming) {
       Serial0.print("$SDERR:INVALID_SPS$$$");
+      emitSdDiag(0);
     }
     return fileIsOpen;
   }
@@ -234,7 +275,7 @@ boolean setupSDcard(char limit){
   if (padded > 0xFFFFFFFFULL) {
     if(!board.streaming) {
       Serial0.println("duration exceeds uint32 block range");
-      board.sendEOT();
+      emitSdDiag(0);
     }
     return fileIsOpen;
   }
@@ -250,7 +291,7 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.print("createfdContiguous fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-      board.sendEOT();
+      emitSdDiag(0);
     }
     cardInit = false;
     return fileIsOpen; // P2-1
@@ -260,7 +301,7 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.print("get contiguousRange fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-      board.sendEOT();
+      emitSdDiag(0);
     }
     cardInit = false;
     return fileIsOpen; // P2-1
@@ -274,7 +315,7 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.println("erase block fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-      board.sendEOT();
+      emitSdDiag(0);
     }
     cardInit = false;
     return fileIsOpen; // P2-1
@@ -298,16 +339,11 @@ boolean setupSDcard(char limit){
   minWriteTime = 65000;
   byteCounter = 0;  // counter from 0 - 512
   blockCounter = 0; // counter from 0 - BLOCK_COUNT;
-  if(fileIsOpen == true){  // send corresponding file name to controlling program
-    if(!board.streaming) {
-      Serial0.print("Corresponding SD file ");
-      Serial0.println(currentFileName);
-      LED_SD_Status_Indication(OK_BLINKS, 250, OK_LED);
-    }
+  // P2-8: single merged diag+filename frame replaces the previous two-frame protocol.
+  if (fileIsOpen) {
+    LED_SD_Status_Indication(OK_BLINKS, 250, OK_LED);
   }
-  if(!board.streaming) {
-    board.sendEOT();
-  }
+  emitSdDiag(1);
   return fileIsOpen;
 }
 
