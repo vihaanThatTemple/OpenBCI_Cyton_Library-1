@@ -162,3 +162,11 @@ def test_arm_returns_diag_on_healthy_frame(fake_serial):
     assert result == ok
     assert proto.last_diag is not None
     assert proto.last_diag.file == "OBCI_01.TXT"
+
+
+def test_parse_sd_diag_preserves_ads_id_zero():
+    # Regression: previously a firmware-emitted 0x00 was mis-stored as 0xFF.
+    # The bug: `_parse_int_field(...) or 0xFF` evaluated 0 as falsy and used the fallback.
+    frame = b"%SD_DIAG fw=v3.1.5-p0 ads_id=0x00 daisy_id=NA rtc=1 sps=250 free_blocks=100 file=OBCI_01.TXT$$$"
+    diag = parse_sd_diag_frame(frame)
+    assert diag.ads_id == 0, f"ads_id should be 0 (as emitted), got 0x{diag.ads_id:02X}"

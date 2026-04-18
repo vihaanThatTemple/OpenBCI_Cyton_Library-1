@@ -129,12 +129,17 @@ def parse_sd_diag_frame(frame: bytes) -> SdDiag:
         raise ValueError(f"not a %SD_DIAG frame: {frame[:40]!r}")
     body = frame[len(_DIAG_PREFIX):].rstrip(b"$").decode(errors="replace")
     fields = dict(kv.split("=", 1) for kv in body.split() if "=" in kv)
+    # Parse the three always-present numeric fields. Defaults ("0xFF", "0", "0") are not "NA",
+    # so _parse_int_field never returns None; use ternary to satisfy type checker.
+    ads_id_val = _parse_int_field(fields.get("ads_id", "0xFF"))
+    rtc_ms_val = _parse_int_field(fields.get("rtc", "0"))
+    sps_val = _parse_int_field(fields.get("sps", "0"))
     return SdDiag(
         fw=fields.get("fw", ""),
-        ads_id=_parse_int_field(fields.get("ads_id", "0xFF")) or 0xFF,
+        ads_id=ads_id_val if ads_id_val is not None else 0xFF,
         daisy_id=_parse_int_field(fields.get("daisy_id", "NA")),
-        rtc_ms=_parse_int_field(fields.get("rtc", "0")) or 0,
-        sps=_parse_int_field(fields.get("sps", "0")) or 0,
+        rtc_ms=rtc_ms_val if rtc_ms_val is not None else 0,
+        sps=sps_val if sps_val is not None else 0,
         free_blocks=_parse_int_field(fields.get("free_blocks", "NA")),
         file=(None if fields.get("file", "NA") == "NA" else fields.get("file")),
     )
