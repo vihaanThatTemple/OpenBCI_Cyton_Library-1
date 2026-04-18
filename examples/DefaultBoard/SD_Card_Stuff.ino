@@ -136,7 +136,10 @@ char sdProcessChar(char character) {
 
 
 boolean setupSDcard(char limit){
-    
+  // P2-1: clear stale extent cursors so an early-return cannot feed garbage to erase/writeStart.
+  bgnBlock = 0;
+  endBlock = 0;
+
   if(!cardInit){
       if(!card.init(SPI_FULL_SPEED, SD_SS)) {
         if(!board.streaming) {
@@ -200,18 +203,20 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.print("createfdContiguous fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-      
+      board.sendEOT();
     }
     cardInit = false;
+    return fileIsOpen; // P2-1
   }//else{Serial0.print("got contiguous file...");delay(1);}
   // get the location of the file's blocks
   if (!openfile.contiguousRange(&bgnBlock, &endBlock)) {
     if(!board.streaming) {
       Serial0.print("get contiguousRange fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
-   
+      board.sendEOT();
     }
     cardInit = false;
+    return fileIsOpen; // P2-1
   }//else{Serial0.print("got file range...");delay(1);}
   
   // grab the Cache
@@ -222,8 +227,10 @@ boolean setupSDcard(char limit){
     if(!board.streaming) {
       Serial0.println("erase block fail");
       LED_SD_Status_Indication(ERROR_BLINKS, 500, ERROR_LED);
+      board.sendEOT();
     }
     cardInit = false;
+    return fileIsOpen; // P2-1
   }//else{Serial0.print("erased...");delay(1);}
  
   if (!card.writeStart(bgnBlock, BLOCK_COUNT)){
